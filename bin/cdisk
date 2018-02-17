@@ -1,124 +1,284 @@
 #!/bin/bash
+#
+# Manage encrypted disk images
+#
 
-# thanks
-# irc://freenode#archlinux
-# irc://freenode#bash
+#
+# XDG defaults
+#
+data_home=${XDG_DATA_HOME:-$HOME/.local/share}
+config_home=${XDG_CONFIG_HOME:-$HOME/.config}
+
+#
+# Default locations
+#
+disks=${CDISK_DISKS:-$data_home/cdisk/disks}
+headers=${CDISK_HEADERS:-$data_home/cdisk/headers}
+keys=${CDISK_KEYS:-$data_home/cdisk/keys}
+mounts=${CDISK_MOUNTS:-$HOME}
+configs=${CDISK_CONFIGS:-$config_home/cdisk/disks}
+config=${CDISK_CONFIG:-$config_home/cdisk/cdisk.cfg}
 
 
-##################################################
-# Configuration
-##################################################
+#
+# Default options
+#
 
-cdisk_config_home=${CDISK_CONFIG_HOME:-$HOME/.config/cdisk}
-cdisk_config=${CDISK_CONFIG:-$cdisk_config_home/config.sh}
+# verbosity
+verbose=0
 
-if [[ -f "$cdisk_config" ]]; then
-    # shellcheck source=/dev/null
-    source "$cdisk_config"
-fi
+# options for cryptsetup creation
+crypt_create=(
+    --align-payload 8192
+    --cipher aes-xts-plain64
+    --hash sha512
+    --iter-time 5000
+    --key-size 512
+    --type luks2
+    --use-random
+)
 
-##################################################
-# Settings
-##################################################
+# options for cryptsetup open
+crypt_open=(
+    --type luks2
+)
 
-cdisk_home=${CDISK_HOME:-$HOME/crypt}
-cdisk_disks=${CDISK_DISKS:-$cdisk_home/.disks}
-key_len=${CDISK_KEY_LEN:-1024}
+# options for securing keys with gpg
+secure_key=(
+    --verbose
+    --cipher-algo aes256
+    --digest-algo sha512
+    --symmetric
+    --armor
+)
 
 ##################################################
 # User Interface
 ##################################################
 
-cmd_usage() {
-    echo "cdisk - cryptdisk 0.0.1a"
-    echo "usage: $0 <command> [<args>]"
-    echo
-    echo "manage encrypted disk images"
-    echo
-    echo "COMMANDS:"
-    echo "    close <name> - close a disk"
-    echo "    close-all - close all open disks"
-    echo "    create <name> <size> - create an image of give size"
-    echo "    list - list all disks"
-    echo "    list-open - list open disks"
-    echo "    open <name> - open a disk"
-    echo "    open-all - open all unopened disks"
+# fun: show_help
+# txt: show help
+show_help()
+{
+    self=${0##*/}
+    cat << EOF
+NAME
+    $self - Manage encrypted disk images
+
+USAGE
+    $self create NAME SIZE
+    $self open NAME
+    $self close NAME
+    $self destroy NAME
+    $self list
+    $self list-open
+
+COMMANDS
+    create NAME SIZE
+        Create a new encrypted image
+        NAME    name of disk
+        SIZE    size of disk
+
+    open NAME
+        Open and mount a disk
+        NAME    name of disk
+
+    close NAME
+        Unmount and close a disk
+        NAME    name of disk
+
+    destroy NAME
+        Destroy disk image
+        NAME    name of disk
+
+    list
+        list disks
+
+    list-open
+        list opened disks
+
+CONFIGURATION
+    The global configuration script will be sourced if it exists, followed by
+    the by a disk specific configuration if it exists. The configuration file
+    can override methods or define the following to override the defaults:
+        keyfile - path to encrypted keyfile
+        disk - path to disk image
+        header - path to disk header
+        mapper - path to mapper
+        mount - path to mount disk at
+
+    Additionally, you can define an "init" function which will be called before
+    any operation. This can be used, for example, to check for the existence of
+    some external media which is intended to store headers and keys
+
+
+ENVIRONMENT VARIABLES
+    CDISK_DISKS
+        Defines the path to directory of disk files
+
+    CDISK_HEADERS
+        Defines path to directory of header files
+
+    CDISK_KEYS
+        Defines path to directory of key files
+
+    CDISK_MOUNTS
+        Defines path to directory to mount disks at
+
+    CDISK_CONFIGS
+        Defines path to directory to look for named disk configs
+
+    CDISK_CONFIG
+        Defines path to global config file
+
+SEE ALSO
+    gpg(1), cryptsetup(8)
+
+EOF
+    show_config
 }
 
+# fun: show_config
+# txt: show current configuration
+show_config()
+{
+    printf '%s\n' "CURRENT CONFIGURATION "
+    for cfg in disks headers keys mounts configs config; do
+        printf '    %-9s %s\n' "$cfg:" "${!cfg}"
+    done
+
+    for val in keyfile disk header mapper mount; do
+        [[ "${!val}" ]] &&
+            printf '    %-9s %s\n' "$val:" "${!val}"
+    done
+}
+
+
+# fun: die msg
+# param: msg: message to display
+# txt: print msg to stderr and exit 1
 die() {
-	echo "cdisk: ERROR: ${FUNCNAME[1]}: $1" >&2
-	exit 1
+    printf '%s\n' "$*" >&2
+    exit 1
 }
 
+# fun: err msg
+# param: msg: message to display
+# txt: print msg to stderr
+err() {
+    printf '%s\n' "$*" >&2
+}
+
+# fun: info msg
+# param: msg: message to display
+# txt: print msg to stderr if verbosity allows
 info() {
-    [[ "$verbose" -gt 0 ]] && echo "cdisk: INFO: $1"
+    ((verbose>0)) && printf '%s\n' "$*" >&2
 }
 
-# fun: prompt prompt_txt
-# txt: prompt user for manual input
-# opt: prompt_txt: the prompt to display
-prompt() {
-    local -r prompt_txt="$1"
-    local response
-
-    [[ -z "$prompt_txt" ]] && die "Invalid prompt"
-
-    read -s -r -p "$prompt_txt" response || die "Invalid input"
-    printf '\n' >&2
-    printf '%s' "$response"
+# fun: debug msg
+# param: msg: message to display
+# txt: print msg to stderr if verbosity allows
+debug() {
+    ((verbose>1)) && printf '%s\n' "$*" >&2
 }
-
 
 ##################################################
-# Propetry Getters
+# Getters
 ##################################################
 
-# fun: get_img_path name
-# txt: given a name, output path to image
-# arg: name: the name of the encrypted disk
-get_img_path(){
-    printf '%s/%s.luks' "$cdisk_disks" "$1"
+# fun: get_keyfile name
+# param: name: name of disk
+# txt: print the path to keyfile
+get_keyfile()
+{
+    [[ "$keyfile" ]] && printf %s "$keyfile" && return
+    printf '%s/%s.key.gpg' "$keys" "$1"
 }
 
-
-# fun: get_key_name name
-# txt: given a name, output name of the entry in the key store
-# arg: name: the name of the encrypted disk
-get_key_name() {
-    printf 'cdisk/%s' "$1"
+# fun: get_disk name
+# param: name: name of disk
+# txt: print the path to disk
+get_disk()
+{
+    [[ "$disk" ]] && printf %s "$disk" && return
+    printf '%s/%s.luks' "$disks" "$1"
 }
 
-# fun: get_mapper_name name
-# txt: given a name, output name of the device maper to use
-# arg: name: the name of the encrypted disk
-get_mapper_name() {
+# fun: get_header name
+# param: name: name of disk
+# txt: print the path to header
+get_header()
+{
+    [[ "$header" ]] && printf %s "$header" && return
+    printf '%s/%s.header' "$headers" "$1"
+}
+
+# fun: get_mapper name
+# param: name: name of disk
+# txt: print the path to mapper
+get_mapper()
+{
+    [[ "$mapper" ]] && printf %s "$mapper" && return
     printf 'cdisk--%s' "${1//\//_}"
 }
 
-# fun: get_mapper_path mapper_name
-# txt: given a name, output path to the device mapper
-# arg: mapper_name: the name of the encrypted disk
-get_mapper_path() {
-    printf '/dev/mapper/%s' "$1"
+# fun: get_mount name
+# param: name: name of disk
+# txt: print the path to mount point
+get_mount()
+{
+    [[ "$mount" ]] && printf %s "$mount" && return
+    printf '%s/%s' "$mounts" "$1"
 }
 
-# fun: get_mount_point name
-# txt: given a name, output path mount point
-# arg: name: the name of the encrypted disk
-get_mount_point() {
-    printf '%s/%s' "$cdisk_home" "$1"
+# fun: get_config name
+# param: name: name of disk
+# txt: print the path to disk config
+get_config()
+{
+    printf '%s/%s.cfg' "$configs" "$1"
 }
 
-# fun: img_to_name
-# txt: reads from stdin and convers img path to name
-img_to_name() {
-    local path
-    while read -r path; do
-        [[ $path = "$cdisk_disks"* ]] || continue
-        path=${path#"$cdisk_disks/"}
-        path=${path%.luks};
-        printf '%s\n' "$path";
-    done | sort
+
+##################################################
+# FSIO
+##################################################
+
+# fun: touch_disk img size
+# param: img: path to image
+# param: size: size of image
+# txt: create a disk image
+touch_disk()
+{
+    local disk=$1
+    local size=$2
+    info "Creating $size image at $disk"
+    [[ -e "$disk" ]] && die "$disk already exists"
+    mkdir -vp "${disk%/*}"
+    fallocate -l "$size" "$disk" && chmod 600 "$disk"
+}
+
+# fun: touch_header img
+# param: img: path to image
+# txt: create a header image
+touch_header()
+{
+    info "Creating header at $1"
+    [[ -e "$1" ]] && die "$1 already exists"
+    mkdir -vp "${1%/*}"
+    fallocate -l 4M "$1" && chmod 600 "$1"
+}
+
+# fun: store_key file
+# param: file: path to persisted key
+# txt: encrypt stdin to keyfile
+store_key()
+{
+    [[ -e "$1" ]] && die "$1 already exists"
+    mkdir -vp "${1%/*}"
+    gpg "${secure_key[@]}" --output "$1" || die "Could not secure key"
+    chmod 400 "$1"
 }
 
 
@@ -126,396 +286,258 @@ img_to_name() {
 # Methods
 ##################################################
 
-# fun: generate_key length
-# txt: generate a random key of given length
-# opt: name: the name of the encrypted disk
-generate_key() {
-    local -r length="$1"
-    local key
-
-    [[ ! $length =~ ^[0-9]+$ ]] && die "Keylength \"$length\" must be a number."
-
-    read -r -n "$length" key < <(LC_ALL=C tr -dc "[:alnum:]" < /dev/urandom)
-
-	[[ ${#key} -eq $length ]] ||
-        die "Could not generate password from /dev/urandom."
-
-    printf '%s' "$key"
+# fun: init
+# txt: can be overridden by configs
+init()
+{
+    # turnkey to be overridden in configs
+    return
 }
 
-# fun: manual_key key_name
-# txt: read a key from stdin. confirm if not piped to STDIN
-# opt: key_name: the name of the key
-manual_key() {
-    local -r key_name="$1"
-    local key confirm
-
-    [[ -z "$key_name" ]] && die "Invalid key name"
-
-    if [ -t 0 ]; then
-        # In a terminal, prompt and confirm
-        key=$(prompt "[$key_name] Enter key:") || die "Invalid key"
-        confirm=$(prompt "[$key_name] Confirm key:") || die "Invalid key"
-        [[ "$key" != "$confirm" ]] && die "Keys do not match"
-    else
-        # Read from pipe
-        read -r -p -t0.01 key || die "No key present"
-    fi
-
-    [[ -z "$key" ]] && die "No key available"
-
-    printf '%s' "$key"
+# fun: img_to_name
+# txt: reads from stdin and convers disk file paths to names
+img_to_name() {
+    local path
+    while read -r path; do
+        [[ $path = "$disks"* ]] || continue
+        path=${path#"$disks/"}
+        path=${path%.luks};
+        printf '%s\n' "$path";
+    done | sort
 }
 
-# fun: store_key name key
-# txt: store a key in the key store
-# opt: key_name: the name of the key in the store
-# opt: key: the key to store
-store_key() {
-    local -r key_name="$1"
-    local -r key="$2"
-
-    [[ -z "$key_name" ]] && die "Invalid key name"
-    [[ -z "$key" ]] && die "Invalid key"
-
-    if pass ls  "$key_name" > /dev/null 2>&1; then
-        die "Key entry already exists for $key_name"
-    fi
-
-    info "Storing key for $key_name"
-
-    printf '%s' "$key" | pass insert -e "$key_name" > /dev/null
+# fun: generate_key
+# txt: generates random key
+generate_key()
+{
+    info "Generating key"
+    dd if=/dev/urandom bs=1 count=4096
 }
 
-# fun: get_key name
-# txt: output the key for a given disk
-# opt: name: the name of the encrypted disk
-get_key() {
-    local -r key_name="$1"
-    [[ -z "$key_name" ]] && die "Invalid key name"
-    pass show "$key_name" || die "No key available for $key_name"
-}
-
-# fun: input_key name
-# txt: prompt user for manual input of key
-# opt: name: the name of the encrypted disk
-input_key() {
-    local -r key_name="$1"
-    local key
-
-    [[ -z "$key_name" ]] && die "Invalid key name"
-
-    if [ -t 0 ]; then
-        # In a terminal, prompt and confirm
-        key=$(prompt "[$key_name] Enter key:") || die "Invalid key"
-    else
-        # Read from pipe
-        read -r -p -t0.01 key || die "No key on stdin"
-    fi
-
-    [[ -z "$key" ]] && die "No key available"
-
-    printf '%s' "$key"
-}
-
-# fun: make_disk path size
-# txt: create an empty unfomratted image
-# opt: path: the path to the image to create
-# opt: size: the size of the image to create (eg 10M 1G)
-make_disk() {
-    local -r img="$1"
-    local -r size="$2"
-
-    [[ -e "$img" ]] && die "Disk $img exists"
-    [[ -z "$size" ]] && die "Invalid size $size" #TODO Validation
-
-    local -r parent_dir=$(dirname "$img")
-
-    local mkdir_args=(-p)
-    [[ "$verbose" -gt 0 ]] && mkdir_args+=(-v)
-
-    [[ -d "$parent_dir" ]] || mkdir "${mkdir_args[@]}" "$parent_dir"
-
-    info "Creating $size disk $img"
-    dd bs=1 count=0 if=/dev/zero of="$img" seek="$size"
-}
-
-# fun: format_disk path key
-# txt: luksFormat an image with cryptsetup
-# opt: path: the path to the image to create
-# opt: key: the key to use as a key
-format_disk() {
-    local -r img="$1"
-    local -r key="$2"
-
-    # TODO overidable?
-    local cryptsetup_args=(
-        --cipher aes-xts-plain64
-        --hash sha512
-        --iter-time 5000
-        --key-size 512
-        --use-random
-        luksFormat
-        "$img"
-        - # STDIN
-    )
-
-    [[ -f "$img" ]] || die "$img does not exist"
-    [[ -z "$key" ]] && die "Invalid key"
-
-    [[ "$verbose" -gt 0 ]] && cryptsetup_args+=(--verbose)
-
-    info "Formatting img $img"
-    printf '%s' "$key" | cryptsetup "${cryptsetup_args[@]}"
-}
-
-dm_exists() {
-    local -r mapper_name="$1"
-    sudo dmsetup status "$mapper_name" > /dev/null 2>&1
+# fun: read_key name
+# param: name: name of disk
+# txt: reads a keyfile
+read_key()
+{
+    local name=$1
+    [[ "$name" ]] || die "No name specified"
+    local -r keyfile=$(get_keyfile "$name")
+    info "Reading key at $keyfile"
+    [[ -f "$keyfile" ]] || die "$keyfile does not exist"
+    gpg -d "$keyfile" 2>/dev/null || die "Failed to read key"
 }
 
 # fun: open_disk name
-# txt: open an encrypted disk
-# opt: name: the name of the encrypted disk
-open_disk() {
-    local -r img="$1"
-    local -r key="$2"
-    local -r mapper_name="$3"
+# param: name: name of disk
+# txt: opens a disk
+open_disk()
+{
+    local -r name=$1
 
-    [[ -f "$img" ]] || die "$img does not exist"
-    [[ -z "$key" ]] && die "No key available!"
-    dm_exists "$mapper_name" && die "Mapper $mapper_name in use"
+    [[ "$name" ]] || die "No name specified"
 
-    local cryptsetup_args=(
-        luksOpen "$img" "$mapper_name" --key-file - #STDIN
+    local -r disk=$(get_disk "$name")
+    local -r header=$(get_header "$name")
+    local -r mapper=$(get_mapper "$name")
+
+    [[ -f "$disk" ]] || die "$disk does not exist"
+    [[ -f "$header" ]] || die "$header does not exist"
+    [[ -e "/dev/mapper/$mapper" ]] && die "mapper $mapper in use"
+
+    info "Opening $name" "-header: $header" "-mapper: $mapper"
+
+    crypt_opt=(
+        open
+        "${crypt_open[@]}" #configd crypt options
+        --key-file - # Read key from stdin
+        --header "$header"
+        "$disk"
+        "$mapper"
     )
 
-    [[ "$verbose" -gt 0 ]] && cryptsetup_args+=(--verbose)
+    debug "Crypt Options:" "${crypt_opt[@]}"
 
-    info "Opening cryptdisk: $img"
-
-    printf '%s' "$key" | sudo cryptsetup "${cryptsetup_args[@]}" ||
-        die "Failed to open $img"
+    sudo cryptsetup "${crypt_opt[@]}" || die "Failed to open"
 }
 
-# fun: close_disk name
-# txt: close an encrypted disk
-# opt: name: the name of the encrypted disk
-close_disk() {
-    local -r mapper_name="$1"
+# fun: is_open name
+# param: name: name of disk
+# txt: returns 0 if open otherwise 1
+is_open()
+{
+    local -r name=$1
 
-    dm_exists "$mapper_name" || die "Mapper $mapper_name does not exist"
+    [[ "$name" ]] || die "No name specified"
 
-    local cryptsetup_args=(luksClose "$mapper_name")
+    local -r disk=$(get_disk "$name")
 
-    [[ "$verbose" -gt 0 ]] && cryptsetup_args+=(--verbose)
-
-    info "Closing $mapper_name"
-
-    sudo cryptsetup "${cryptsetup_args[@]}"
-}
-
-# fun: fs_disk name mapper
-# txt: make filesystem on a device
-# opt: name: the name of the encrypted disk
-fs_disk() {
-    local -r mapper_name="$1"
-    local -r name="$2"
-
-    dm_exists "$mapper_name" || die "Mapper $mapper_name does not exist"
-
-    local -r mapper_path=$(get_mapper_path "$mapper_name")
-
-    # Args
-    local mkfs_args=(-L "$name" "$mapper_path")
-
-    # Verbosity
-    [[ "$verbose" -lt 1 ]] && mkfs_args+=(-q)
-    [[ "$verbose" -gt 1 ]] && mkfs_args+=(-v)
-
-
-    # Action
-    info "Creating filesystem for $name on $mapper_path"
-    sudo mkfs.ext4 "${mkfs_args[@]}"
+    while read -r open; do
+        [[ "$open" == "$disk" ]] && return 0
+    done < <(losetup --list --noheadings --output BACK-FILE)
+    return 1
 }
 
 # fun: mount_disk name
-# txt: mount an open disk
-# opt: name: the name of the encrypted disk
-mount_disk() {
-    local -r mapper_path="$1"
-    local -r mount_point="$2"
+# param: name: name of disk
+# txt: mounts a disk
+mount_disk()
+{
+    local name=$1
 
-    # Validation
-    [[ -e "$mapper_path" ]] || die "$mapper_path does not exist"
-    [[ -e "$mount_point" ]] && die "$mount_point already exists!"
+    [[ "$name" ]] || die "No name specified"
 
-    # Args
-    local mkdir_args=(-p "$mount_point")
-    local mount_args=("$mapper_path" "$mount_point")
-
-    # Verbosity
-    if [[ "$verbose" -gt 0 ]]; then
-        mkdir_args+=(-v)
-        mount_args+=(-v)
-    fi
-
-    # Action
-    info "Mounting $mount_point"
-    mkdir "${mkdir_args[@]}"
-    sudo mount "${mount_args[@]}"
+    local -r mapper=$(get_mapper "$name")
+    local -r mount=$(get_mount "$name")
+    info "Mounting disk at $mount"
+    mkdir -vp "$mount" || die "Couldn't create mount point"
+    sudo mount /dev/mapper/"$mapper" "$mount" || die "Failed to mount"
 }
 
-# fun: unmount_disk name
-# txt: unmount a mounted disk
-# opt: name: the name of the encrypted disk
-unmount_disk() {
-    local -r mount_point="$1"
-
-    # Validation
-    [[ -d "$mount_point" ]] || die "$mount_point does not exist"
-
-    # Args
-    local umount_args=("$mount_point")
-    local rmdir_args=("$mount_point")
-
-    # Verbosity
-    if [[ "$verbose" -gt 0 ]]; then
-        umount_args+=(-v)
-        rmdir_args+=(-v)
-    fi
-
-    # Action
-    sudo umount "${umount_args[@]}" || die "Failed to unmount"
-    rmdir "${rmdir_args[@]}" || die "Failed to remove mount point"
+# fun: load_config name
+# param: name: name of disk
+# txt: loads a named disk config
+load_config()
+{
+    [[ "$1" ]] || die "No name specified"
+    local -r config=$(get_config "$1")
+    # shellcheck source=/dev/null
+    [[ -f "$config" ]] && {
+        info "Loading config at $config"
+        source "$config" || die "bad config"
+    }
 }
 
-# fun: own_disk name
-# txt: take ownership of a newly created fileystem
-# opt: name: the name of the encrypted disk
-own_disk() {
-    local -r mount_point="$1"
+# fun: post_create name
+# param: name: name of disk
+# txt: post create hook. creates filesystem, and owns it
+post_create()
+{
+    local name=$1
 
-    local chown_args=(-R "$USER" "$mount_point")
-    [[ "$verbose" -gt 0 ]] && chown_args+=(-v)
+    [[ "$name" ]] || die "No name specified"
 
-    sudo chown "${chown_args[@]}"
+    local -r mapper=$(get_mapper "$name")
+    local -r mount=$(get_mount "$name")
+
+    sudo mkfs.ext4 -L "$name" /dev/mapper/"$mapper" ||
+        die "Couldn't make filesystem on disk"
+
+    mount_disk "$name"             || die "Couldn't mount disk"
+    sudo chown -R "$USER" "$mount" || die "Couldn't own disk"
+    chmod 700 "$mount"
 }
+
 
 ##################################################
 # Commands
 ##################################################
 
 # fun: cmd_create name size
-# txt: create a new cdisk
-#       - generate and persist a key in the key store
-#       - make an image of specified size
-#       - luksFormat the image with the key
-#       - open the disk
-#       - create a file system on the disk
-#       - mount the volume
-#       - take ownership of the filesystem
-# opt: name: the name of the encrypted disk
-# opt: size: the size of the image to create (eg 10M 1G)
-cmd_create() {
+# param: name: name of disk
+# param: size: size of disk
+# txt: creates an encrypted disk image
+cmd_create()
+{
+    local name=$1
+    local size=$2
 
-    local store_key=true
-    local manual_key=false
+    [[ "$name" ]] || die "No name specified"
+    [[ "$size" ]] || die "No size specified"
 
-    while :; do
-        case "$1" in
-            -nks|--no-key-store) store_key=false ;;
-            -k|--key) manual_key=true ;;
-            --) shift ; break ;;
-            -?*) printf 'WARN: Unknown option (ignored): %s\n' "$1" >&2 ;;
-            *) break
-        esac
-        shift
+    local  key
+    local -r keyfile=$(get_keyfile "$name")
+    local -r disk=$(get_disk "$name")
+    local -r header=$(get_header "$name")
+
+
+    key=$(generate_key | base64 )               || die "Couldn't generate key"
+    base64 -d <<< "$key" | store_key "$keyfile" || die "Couldn't store key"
+    touch_disk "$disk" "$size"                  || die "Couldn't create disk image"
+    touch_header "$header"                      || die "Couldn't create disk header"
+
+    local crypt_opt=(
+        luksFormat
+        "${crypt_create[@]}"
+        --header "$header"
+        "$disk"
+        - # Read key from stdin
+    )
+
+    debug "Crypt Options:" "${crypt_opt[@]}"
+
+    base64 -d <<< "$key" | cryptsetup "${crypt_opt[@]}" ||
+        die "Couldn't format disk"
+
+    base64 -d <<< "$key" | open_disk "$name" ||
+        die "Couldn't open disk"
+
+    post_create "$name" || die "Post create failed"
+}
+
+# fun: cmd_destroy name
+# param: name: name of disk
+# txt: delete encrypted disk image
+cmd_destroy()
+{
+    local name=$1
+
+    [[ "$name" ]] || die "No name specified"
+
+    local -r keyfile=$(get_keyfile "$name")
+    local -r disk=$(get_disk "$name")
+    local -r header=$(get_header "$name")
+
+    is_open "$name" && { cmd_close "$name" || die "couldn't close $name"; }
+
+    printf 'Remove the following:\n'
+    for val in keyfile disk header; do
+        printf '%-9s %s\n' "$val:" "${!val}"
     done
 
-    local -r name="$1"
-    local -r size="$2"
-
-    local -r img=$(get_img_path "$name")
-    local -r mapper_name=$(get_mapper_name "$name")
-    local -r mapper_path=$(get_mapper_path "$mapper_name")
-    local -r key_name=$(get_key_name "$name")
-    local -r mount_point=$(get_mount_point "$name")
-
-    # Validate input
-    [[ -z "$name" ]] && die "No name!"
-    [[ -z "$size" ]] && die "No size!"
-    [[ -f "$img" ]] && die "'$name' ($img) exists!"
-    [[ -f "$mapper_path" ]] && die "Device ($mapper_path) already mapped!"
-
-    #
-    # Key setup
-    #
-    if [[ "$manual_key" = true ]]; then
-        local -r key=$(manual_key "$key_name") || die "Getting key"
-    else
-        info "Generating key of length $length"
-        local -r key=$(generate_key "$key_len") || die "Generating key"
-        [[ "$store_key" = false ]] && printf '[%s] key:\n%s\n' "$key_name" "$key"
+    read -r -p '[type YES (uppercase) to confirm] '
+    if [[ "$REPLY" == "YES" ]]; then
+        rm -v "$keyfile" "$disk" "$header" ||
+            die "Failed to destroy $name"
+        return
     fi
-
-    if [[ "$store_key" = true ]]; then
-        store_key "$key_name" "$key" || die "Storing key"
-    fi
-
-    #
-    # Crypt disk
-    #
-    make_disk "$img" "$size"                 || die "Making disk"
-    format_disk "$img" "$key"                || die "Formatting disk"
-    open_disk "$img" "$key" "$mapper_name"   || die "Opening disk"
-    fs_disk "$mapper_name" "$name"           || die "Creating filesystem"
-    mount_disk "$mapper_path" "$mount_point" || die "Mounting disk"
-
-    # Post-create
-    own_disk "$mount_point" || die "Owning disk"
+    printf '%s\n' "Canceled"
 }
 
 # fun: cmd_open name
-# txt: open and mount a disk
-# opt: name: the name of the encrypted disk
-cmd_open() {
-    # TODO manual key
-    local -r name="$1"
+# param: name: name of disk
+# txt: open sncrypted image
+cmd_open()
+{
+    local name=$1
 
-    local -r img=$(get_img_path "$name")
-    local -r mapper_name=$(get_mapper_name "$name")
-    local -r mapper_path=$(get_mapper_path "$mapper_name")
-    local -r mount_point=$(get_mount_point "$name")
+    [[ "$name" ]] || die "No name specified"
 
-    local -r key_name=$(get_key_name "$name")
-    local -r key=$(get_key "$key_name")
-
-    [[ -z "$name" ]] && die "Must specify a name for the disk!"
-
-    open_disk "$img" "$key" "$mapper_name"  || die "Opening disk"
-    mount_disk "$mapper_path" "$mount_point" || die "Mounting disk"
+    is_open "$name" && die "$name already open"
+    read_key "$name" | open_disk "$name" || die "Couldn't open disk"
+    mount_disk "$name" || die "Couldn't mount disk"
 }
 
 # fun: cmd_close name
-# txt: unmount and close a disk
-# opt: name: the name of the encrypted disk
-cmd_close() {
-    local -r name="$1"
+# param: name: name of disk
+# txt: close sncrypted image
+cmd_close()
+{
+    local name=$1
 
-    [[ -z "$name" ]] && die "Must specify a name for the disk!"
+    [[ "$name" ]] || die "No name specified"
 
-    local -r mapper_name=$(get_mapper_name "$name")
-    local -r mount_point=$(get_mount_point "$name")
-
-    unmount_disk "$mount_point"
-    close_disk   "$mapper_name"
+    local -r mapper=$(get_mapper "$name")
+    local -r mount=$(get_mount "$name")
+    is_open "$name"                 || die "$name not open"
+    sudo umount "$mount"            || die "Couldn't unmount"
+    sudo cryptsetup close "$mapper" || die "Couldn't close"
+    rmdir "$mount"                  || die "Couldn't rm mount"
 }
 
 # fun: cmd_list
 # txt: list all disks
 cmd_list() {
-    find "$cdisk_disks" -type f -name '*.luks' | img_to_name
+    find "$disks" -type f -name '*.luks' | img_to_name
 }
 
 # fun: cmd_list_open
@@ -524,59 +546,66 @@ cmd_list_open() {
     losetup --list --noheadings --output BACK-FILE | img_to_name
 }
 
-# fun: cmd_open_all
-# txt: open all closed disks
-cmd_open_all() {
-    #TODO optional regex
-    local cdisk
-    comm -23 <(list) <(list_open) | while read -r cdisk ; do
-        open "$cdisk"
-    done
-}
-
-# fun: cmd_close_all
-# txt: close all opened disks
-cmd_close_all() {
-    #TODO optional regex
-    local open_disk
-    list_open | while read -r open_disk ; do
-        close "$open_disk"
-    done
-}
-
-
 ##################################################
 # Main
 ##################################################
 
-
-## Global options
-verbose=0
-
 while :; do
-    case "$1" in
-        -v|--verbose) verbose=$((verbose + 1)) ;; # Each -v adds 1 to verbosity.
-        --)  shift ; break ;;
+    case $1 in
+        -h|-\?|--help) show_help=true ;;
+        -v|--verbose)  verbose=$((verbose + 1)) ;;
+
+        -c|--config)
+            if [ "$2" ]; then
+                config=$2
+                shift
+            else
+                die 'ERROR: "--config" requires a non-empty option argument.'
+            fi
+            ;;
+        --config=?*) config=${1#*=} ;;
+        --config=) die 'ERROR: "--config" requires a non-empty option argument.' ;;
+
+
+        --) shift; break ;;
         -?*) printf 'WARN: Unknown option (ignored): %s\n' "$1" >&2 ;;
-        *)   break
+        *) break
     esac
+
     shift
 done
 
 
-## Sub command
-
-# program="${0##*/}"
 cmd="$1"
+shift
+
+
+# load main config
+[[ -f "$config" ]] && {
+    info "Loading config at $config"
+    # shellcheck source=/dev/null
+    source "$config" || die "bad config"
+}
+
+# load named disk config
+[[ ! -z "$1" ]] && load_config "$1"
+
+# show help after loading configs
+if [[ "$show_help" == true ]]; then
+    show_help
+    exit
+fi
+
+init # run config init
 
 case "$cmd" in
-    create)     shift;  cmd_create  "$@" ;;
-    open)       shift;  cmd_open    "$@" ;;
-    open-all)           cmd_open_all     ;;
-    close)      shift;  cmd_close   "$@" ;;
-    close-all)          cmd_close_all    ;;
-    list|ls)            cmd_list         ;;
-    list-open)          cmd_list_open    ;;
-    *)                  cmd_usage        ;;
+    create)    cmd_create  "$@" ;;
+    open)      cmd_open    "$@" ;;
+    close)     cmd_close   "$@" ;;
+    destroy)   cmd_destroy "$@" ;;
+    config)    show_config ;;
+    list|ls)   cmd_list         ;;
+    list-open) cmd_list_open    ;;
+    *)  show_help ;;
 esac
 
