@@ -340,7 +340,7 @@ open_disk()
     local -r header=$(get_header "$name")
     local -r mapper=$(get_mapper "$name")
 
-    [[ -f "$disk" ]] || die "$disk does not exist"
+    [[ -e "$disk" ]] || die "$disk does not exist"
     [[ -f "$header" ]] || die "$header does not exist"
     [[ -e "/dev/mapper/$mapper" ]] && die "mapper $mapper in use"
 
