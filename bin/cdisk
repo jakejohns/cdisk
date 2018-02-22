@@ -19,6 +19,14 @@ mounts=${CDISK_MOUNTS:-$HOME}
 configs=${CDISK_CONFIGS:-$config_home/cdisk/disks}
 config=${CDISK_CONFIG:-$config_home/cdisk/cdisk.cfg}
 
+#
+# Config values
+#
+c_disk=
+c_keyfile=
+c_header=
+c_mapper=
+c_mount=
 
 #
 # Default options
@@ -101,11 +109,11 @@ CONFIGURATION
     The global configuration script will be sourced if it exists, followed by
     the by a disk specific configuration if it exists. The configuration file
     can override methods or define the following to override the defaults:
-        keyfile - path to encrypted keyfile
-        disk - path to disk image
-        header - path to disk header
-        mapper - path to mapper
-        mount - path to mount disk at
+        c_keyfile - path to encrypted keyfile
+        c_disk - path to disk image
+        c_header - path to disk header
+        c_mapper - path to mapper
+        c_mount - path to mount disk at
 
     Additionally, you can define an "init" function which will be called before
     any operation. This can be used, for example, to check for the existence of
@@ -147,7 +155,7 @@ show_config()
         printf '    %-9s %s\n' "$cfg:" "${!cfg}"
     done
 
-    for val in keyfile disk header mapper mount; do
+    for val in c_keyfile c_disk c_header c_mapper c_mount; do
         [[ "${!val}" ]] &&
             printf '    %-9s %s\n' "$val:" "${!val}"
     done
@@ -192,7 +200,7 @@ debug() {
 # txt: print the path to keyfile
 get_keyfile()
 {
-    [[ "$keyfile" ]] && printf %s "$keyfile" && return
+    [[ "$c_keyfile" ]] && printf %s "$c_keyfile" && return
     printf '%s/%s.key.gpg' "$keys" "$1"
 }
 
@@ -201,7 +209,7 @@ get_keyfile()
 # txt: print the path to disk
 get_disk()
 {
-    [[ "$disk" ]] && printf %s "$disk" && return
+    [[ "$c_disk" ]] && printf %s "$c_disk" && return
     printf '%s/%s.luks' "$disks" "$1"
 }
 
@@ -210,7 +218,7 @@ get_disk()
 # txt: print the path to header
 get_header()
 {
-    [[ "$header" ]] && printf %s "$header" && return
+    [[ "$c_header" ]] && printf %s "$c_header" && return
     printf '%s/%s.header' "$headers" "$1"
 }
 
@@ -219,7 +227,7 @@ get_header()
 # txt: print the path to mapper
 get_mapper()
 {
-    [[ "$mapper" ]] && printf %s "$mapper" && return
+    [[ "$c_mapper" ]] && printf %s "$c_mapper" && return
     printf 'cdisk--%s' "${1//\//_}"
 }
 
@@ -228,7 +236,7 @@ get_mapper()
 # txt: print the path to mount point
 get_mount()
 {
-    [[ "$mount" ]] && printf %s "$mount" && return
+    [[ "$c_mount" ]] && printf %s "$c_mount" && return
     printf '%s/%s' "$mounts" "$1"
 }
 
@@ -367,14 +375,42 @@ is_open()
 {
     local -r name=$1
 
+    local mappername mountpoint disk mapper device backfile
+
     [[ "$name" ]] || die "No name specified"
 
-    local -r disk=$(get_disk "$name")
+    mappername=$(get_mapper "$name")
+    mountpoint=$(get_mount "$name")
+    disk=$(get_disk "$name")
+    disk=$(readlink -f "$disk")
 
-    while read -r open; do
-        [[ "$open" == "$disk" ]] && return 0
-    done < <(losetup --list --noheadings --output BACK-FILE)
+    mountpoint -q "$mountpoint" || return 1
+    mapper=$(findmnt -n -o SOURCE  --mountpoint "$mountpoint")
+    [[ "$mapper" == "/dev/mapper/$mappername" ]] || return 1
+
+    while read -r device; do
+        if [[ "$device" == loop* ]]; then
+            backfile=$(losetup --list --noheadings --output BACK-FILE "/dev/$device")
+            [[ "$backfile" == "$disk" ]] && return 0
+        else
+            [[ "/dev/$device" == "$disk" ]] && return 0
+        fi
+    done < <(mapper_slaves "$mapper")
+
     return 1
+}
+
+# fun: mapper_slaves mapper_path
+# param: mapper_path: path to mapper
+# txt: print mapper slaves
+mapper_slaves() {
+    local dm
+    dm=$(readlink -f "$1")
+    dm=${dm##*/}
+
+    while read -r slave ; do
+        printf '%s\n' "${slave##*/}"
+    done < <(readlink -f /sys/block/"$dm"/slaves/*)
 }
 
 # fun: mount_disk name
@@ -537,13 +573,21 @@ cmd_close()
 # fun: cmd_list
 # txt: list all disks
 cmd_list() {
-    find "$disks" -type f -name '*.luks' | img_to_name
+    local i
+    for i in "$disks"/*.luks "$configs"/*.cfg; do
+        [[ -f "$i" ]] || continue
+        i="${i##*/}"
+        printf '%s\n' "${i%.*}"
+    done | sort -u
 }
 
 # fun: cmd_list_open
 # txt: list all opened disks
 cmd_list_open() {
-    losetup --list --noheadings --output BACK-FILE | img_to_name
+    local i
+    for i in $(cmd_list) ; do
+        echo "$i"
+    done
 }
 
 ##################################################
@@ -606,6 +650,7 @@ case "$cmd" in
     config)    show_config ;;
     list|ls)   cmd_list         ;;
     list-open) cmd_list_open    ;;
+    is-open)   is_open "$@" ;;
     *)  show_help ;;
 esac
 
