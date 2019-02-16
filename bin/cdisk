@@ -632,7 +632,7 @@ shift
 }
 
 # load named disk config
-[[ ! -z "$1" ]] && load_config "$1"
+[[ -n "$1" ]] && load_config "$1"
 
 # show help after loading configs
 if [[ "$show_help" == true ]]; then
