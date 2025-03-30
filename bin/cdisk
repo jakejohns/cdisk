@@ -37,6 +37,7 @@ verbose=0
 
 # options for cryptsetup creation
 crypt_create=(
+    --verbose
     --align-payload 8192
     --cipher aes-xts-plain64
     --hash sha512
@@ -586,7 +587,7 @@ cmd_list() {
 cmd_list_open() {
     local i
     for i in $(cmd_list) ; do
-        echo "$i"
+        is_open "$i" && printf '%s\n' "$i"
     done
 }
 

@@ -12,12 +12,12 @@ _cdisk()
     case "${prev}" in
         open)
             local -r closed=$(comm -23 <(cdisk list) <(cdisk list-open))
-            COMPREPLY=( "$(compgen -W "${closed}" -- "${cur}")" )
+            mapfile -t COMPREPLY < <(compgen -W "${closed}" -- "${cur}")
             return 0
             ;;
         close)
             local -r disks=$(cdisk list-open)
-            COMPREPLY=( "$(compgen -W "${disks}" -- "${cur}")" )
+            [[ -n "$disks" ]] && mapfile -t COMPREPLY < <(compgen -W "${disks}" -- "${cur}")
             return 0
             ;;
         create)
