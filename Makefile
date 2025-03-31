@@ -4,9 +4,13 @@ MAKEFLAGS += --no-builtin-rules --no-builtin-variables --warn-undefined-variable
 CMD_NAME = cdisk
 CMP_NAME = _cdisk.bash
 
-# Assets
-BASH_SCRIPT = ./src/dot-local/bin/$(CMD_NAME)
-BASH_COMPLETION = ./src/dot-local/bash-completion/completions/$(CMP_NAME)
+# Version
+VERSION_FILE = ./VERSION
+VERSION = $(file < $(VERSION_FILE))
+
+# Sources
+BASH_SCRIPT = ./src/bin/$(CMD_NAME)
+BASH_COMPLETION = ./src/bash-completion/completions/$(CMP_NAME)
 
 # XDG Default
 XDG_DATA_HOME ?= $(HOME)/.local/share
@@ -19,9 +23,14 @@ STOW_TARGET ?= $(HOME)/.local
 # Optionally simulate the stow procedures
 SIMULATE ?= false
 
-# stow options
+# Stow options
 STOW_OPTS ?= $(if $(filter true,$(SIMULATE)), --simulate) \
 			 --no-folding --verbose --target=$(STOW_TARGET) src
+
+.PHONY: version
+version: VERSION
+	@echo "Update $(CMD_NAME) to $(VERSION)"
+	@sed --in-place 's/__VERSION__=.*/__VERSION__=$(VERSION)/' $(BASH_SCRIPT)
 
 .PHONY: install
 install: install-script install-completion
