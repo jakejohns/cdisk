@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Manage encrypted disk images
 #
@@ -330,7 +330,7 @@ read_key()
 {
     local name=$1
     [[ "$name" ]] || die "No name specified"
-    local -r keyfile=$(get_keyfile "$name")
+    local -r keyfile="$(get_keyfile "$name")"
     info "Reading key at $keyfile"
     [[ -f "$keyfile" ]] || die "$keyfile does not exist"
     gpg -d "$keyfile" 2>/dev/null || die "Failed to read key"
@@ -341,13 +341,13 @@ read_key()
 # txt: opens a disk
 open_disk()
 {
-    local -r name=$1
+    local -r name="$1"
 
     [[ "$name" ]] || die "No name specified"
 
-    local -r disk=$(get_disk "$name")
-    local -r header=$(get_header "$name")
-    local -r mapper=$(get_mapper "$name")
+    local -r disk="$(get_disk "$name")"
+    local -r header="$(get_header "$name")"
+    local -r mapper="$(get_mapper "$name")"
 
     [[ -e "$disk" ]] || die "$disk does not exist"
     [[ -f "$header" ]] || die "$header does not exist"
@@ -374,7 +374,7 @@ open_disk()
 # txt: returns 0 if open otherwise 1
 is_open()
 {
-    local -r name=$1
+    local -r name="$1"
 
     local mappername mountpoint disk mapper device backfile
 
@@ -423,8 +423,8 @@ mount_disk()
 
     [[ "$name" ]] || die "No name specified"
 
-    local -r mapper=$(get_mapper "$name")
-    local -r mount=$(get_mount "$name")
+    local -r mapper="$(get_mapper "$name")"
+    local -r mount="$(get_mount "$name")"
     info "Mounting disk at $mount"
     mkdir -vp "$mount" || die "Couldn't create mount point"
     sudo mount /dev/mapper/"$mapper" "$mount" || die "Failed to mount"
@@ -436,7 +436,7 @@ mount_disk()
 load_config()
 {
     [[ "$1" ]] || die "No name specified"
-    local -r config=$(get_config "$1")
+    local -r config="$(get_config "$1")"
     # shellcheck source=/dev/null
     [[ -f "$config" ]] && {
         info "Loading config at $config"
@@ -453,8 +453,8 @@ post_create()
 
     [[ "$name" ]] || die "No name specified"
 
-    local -r mapper=$(get_mapper "$name")
-    local -r mount=$(get_mount "$name")
+    local -r mapper="$(get_mapper "$name")"
+    local -r mount="$(get_mount "$name")"
 
     sudo mkfs.ext4 -L "$name" /dev/mapper/"$mapper" ||
         die "Couldn't make filesystem on disk"
@@ -482,9 +482,9 @@ cmd_create()
     [[ "$size" ]] || die "No size specified"
 
     local  key
-    local -r keyfile=$(get_keyfile "$name")
-    local -r disk=$(get_disk "$name")
-    local -r header=$(get_header "$name")
+    local -r keyfile="$(get_keyfile "$name")"
+    local -r disk="$(get_disk "$name")"
+    local -r header="$(get_header "$name")"
 
 
     key=$(generate_key | base64 )               || die "Couldn't generate key"
@@ -520,9 +520,9 @@ cmd_destroy()
 
     [[ "$name" ]] || die "No name specified"
 
-    local -r keyfile=$(get_keyfile "$name")
-    local -r disk=$(get_disk "$name")
-    local -r header=$(get_header "$name")
+    local -r keyfile="$(get_keyfile "$name")"
+    local -r disk="$(get_disk "$name")"
+    local -r header="$(get_header "$name")"
 
     is_open "$name" && { cmd_close "$name" || die "couldn't close $name"; }
 
@@ -563,8 +563,8 @@ cmd_close()
 
     [[ "$name" ]] || die "No name specified"
 
-    local -r mapper=$(get_mapper "$name")
-    local -r mount=$(get_mount "$name")
+    local -r mapper="$(get_mapper "$name")"
+    local -r mount="$(get_mount "$name")"
     is_open "$name"                 || die "$name not open"
     sudo umount "$mount"            || die "Couldn't unmount"
     sudo cryptsetup close "$mapper" || die "Couldn't close"
@@ -586,9 +586,9 @@ cmd_list() {
 # txt: list all opened disks
 cmd_list_open() {
     local i
-    for i in $(cmd_list) ; do
+    while read -r i; do
         is_open "$i" && printf '%s\n' "$i"
-    done
+    done < <(cmd_list)
 }
 
 ##################################################
@@ -615,7 +615,7 @@ while :; do
         --) shift; break ;;
         -?*) printf 'WARN: Unknown option (ignored): %s\n' "$1" >&2 ;;
         *) break
-    esac
+    ;; esac
 
     shift
 done
