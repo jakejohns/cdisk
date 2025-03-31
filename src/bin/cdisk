@@ -3,6 +3,9 @@
 # Manage encrypted disk images
 #
 
+__NAME__=cdisk
+__VERSION__=0.0.0
+
 #
 # XDG defaults
 #
@@ -64,6 +67,8 @@ secure_key=(
 ##################################################
 # User Interface
 ##################################################
+
+show_version() { printf '%s %s\n' "$__NAME__" "$__VERSION__"; }
 
 # fun: show_help
 # txt: show help
@@ -599,6 +604,7 @@ while :; do
     case $1 in
         -h|-\?|--help) show_help=true ;;
         -v|--verbose)  verbose=$((verbose + 1)) ;;
+        --version)  show_version ; exit ;;
 
         -c|--config)
             if [ "$2" ]; then

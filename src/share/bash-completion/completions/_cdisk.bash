@@ -4,7 +4,7 @@ _cdisk()
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    opts="create open close list list-open --config -c --verbose -v"
+    opts="create open close list list-open --config -c --verbose -v --version -h --help"
 
     case "$prev" in
         open)
